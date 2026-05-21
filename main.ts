@@ -17,6 +17,10 @@ let KindHeal = SpriteKind.create()
 let KindHealFx = SpriteKind.create()
 let KindHitFx = SpriteKind.create()
 let KindAlert = SpriteKind.create()
+let KindEnemyHeart = SpriteKind.create()
+let KindHealBox = SpriteKind.create()
+let KindShopNpc = SpriteKind.create()
+let KindShopItem = SpriteKind.create()
 
 // Enemy data keys: "type" 0=?? 1=??(3HP?) 2=??(????), "hp", "cd", "lastSwing"
 let EnemyTypeNormal = 0
@@ -95,7 +99,22 @@ let RoomTypeBoss = 7
 
 let PlayerSkillFlyingSlash = 1
 let PlayerSkillJumpSmash = 2
+let PlayerSkillWhirlwind = 3
+let PlayerSkillArrowBurst = 4
+let PlayerSkillHealPulse = 5
+let PlayerSkillGroundSlam = 6
+let PlayerSkillLaser = 7
+let PlayerSkillShield = 8
+let PlayerSkillPoison = 9
+let PlayerSkillBlink = 10
+let PlayerSkillHook = 11
+let PlayerSkillMeteor = 12
+let PLAYER_SKILL_COUNT = 12
 let SKILL_BAR_SLOTS = 5
+let HEAL_BOX_AMOUNT = 5
+let HEAL_BOX_COL = 10
+let HEAL_BOX_ROW = 7
+let SHOP_START_GOLD = 50
 let SKILL_DOUBLE_TAP_FRAMES = 28
 let SKILL_COOLDOWN_FRAMES = 300
 let MINI_BOSS_HP = 8
@@ -311,6 +330,10 @@ let aPressInWindow = 0
 let aPressWindowFrame = -1
 let skillCooldownUntil: number[] = [0, 0, 0, 0, 0]
 let skillIgnoresInteriorWalls = false
+let playerGold = SHOP_START_GOLD
+let inShopRoom = false
+let shopCursor = 0
+let healBoxUsedThisRoom = false
 
 let playerIFrames = 0
 let timeStopLeft = 0
@@ -1150,7 +1173,21 @@ function clearRoomSprites() {
     for (let s of sprites.allOfKind(KindHitFx)) {
         s.destroy()
     }
+    for (let s of sprites.allOfKind(KindEnemyHeart)) {
+        s.destroy()
+    }
+    for (let s of sprites.allOfKind(KindHealBox)) {
+        s.destroy()
+    }
+    for (let s of sprites.allOfKind(KindShopNpc)) {
+        s.destroy()
+    }
+    for (let s of sprites.allOfKind(KindShopItem)) {
+        s.destroy()
+    }
     ignoreEnemyDestroys = false
+    healBoxUsedThisRoom = false
+    inShopRoom = false
 }
 
 // healPlayer restores HP up to PLAYER_MAX_LIFE.
@@ -2319,6 +2356,7 @@ function spawnBossAtEndRoom() {
     tiles.placeOnTile(e, loc)
     bossSprite = e
     attachBossHealthBar(e, maxHp)
+    attachEnemyHeartBar(e)
     roomEnemyCount = 1
 }
 
@@ -2337,37 +2375,336 @@ function spawnMiniBossAtRoom() {
     spriteWriteNum(e, "maxhp", MINI_BOSS_HP)
     spriteWriteNum(e, "windup", 0)
     spriteWriteNum(e, "alert", 0)
+    spriteWriteNum(e, "maxhp", MINI_BOSS_HP)
     tiles.placeOnTile(e, loc)
+    attachEnemyHeartBar(e)
     roomEnemyCount = 1
+}
+
+// enemyHeartBarImage draws small hearts for current HP.
+function enemyHeartBarImage(hp: number, maxhp: number): Image {
+    if (maxhp < 1) {
+        maxhp = 1
+    }
+    if (hp < 0) {
+        hp = 0
+    }
+    let w = maxhp * 7 + 2
+    let out = image.create(w, 7)
+    for (let i = 0; i < maxhp; i++) {
+        let filled = i < hp
+        let cx = 1 + i * 7
+        let c = filled ? 2 : 1
+        out.setPixel(cx + 1, 1, c)
+        out.setPixel(cx + 2, 1, c)
+        out.setPixel(cx, 2, c)
+        out.setPixel(cx + 3, 2, c)
+        out.setPixel(cx + 1, 3, c)
+        out.setPixel(cx + 2, 3, c)
+        out.setPixel(cx + 1, 4, c)
+        out.setPixel(cx + 2, 4, c)
+    }
+    return out
+}
+
+// attachEnemyHeartBar spawns a heart HUD sprite above an enemy.
+function attachEnemyHeartBar(e: Sprite) {
+    let hp = spriteReadNum(e, "hp", 1)
+    let maxhp = spriteReadNum(e, "maxhp", hp)
+    let bar = sprites.create(enemyHeartBarImage(hp, maxhp), KindEnemyHeart)
+    spriteWriteNum(bar, "euid", spriteReadNum(e, "euid", 0))
+    bar.setFlag(SpriteFlag.Ghost, true)
+    bar.z = 210
+    syncEnemyHeartBar(e, bar)
+}
+
+// syncEnemyHeartBar moves and updates the heart bar for one enemy.
+function syncEnemyHeartBar(e: Sprite, bar: Sprite) {
+    let hp = spriteReadNum(e, "hp", 1)
+    let maxhp = spriteReadNum(e, "maxhp", hp)
+    bar.setImage(enemyHeartBarImage(hp, maxhp))
+    bar.x = e.x
+    bar.y = e.y - 14
+}
+
+// syncAllEnemyHeartBars updates every enemy heart HUD.
+function syncAllEnemyHeartBars() {
+    for (let bar of sprites.allOfKind(KindEnemyHeart)) {
+        let uid = spriteReadNum(bar, "euid", 0)
+        let found = false
+        for (let e of sprites.allOfKind(KindEnemy)) {
+            if (spriteReadNum(e, "euid", 0) == uid) {
+                syncEnemyHeartBar(e, bar)
+                found = true
+                break
+            }
+        }
+        if (!found) {
+            bar.destroy()
+        }
+    }
+}
+
+// destroyEnemyHeartByUid removes the heart bar when an enemy dies.
+function destroyEnemyHeartByUid(uid: number) {
+    for (let bar of sprites.allOfKind(KindEnemyHeart)) {
+        if (spriteReadNum(bar, "euid", 0) == uid) {
+            bar.destroy()
+        }
+    }
+}
+
+// healBoxImage returns the large healing crate sprite.
+function healBoxImage(): Image {
+    return img`
+        . . . . . . . . . . . . . . . . 
+        . 7 7 7 7 7 7 7 7 7 7 7 7 7 7 . 
+        . 7 11 11 11 11 11 11 11 11 11 7 . 
+        . 7 11 10 10 10 10 10 10 10 11 7 . 
+        . 7 11 10 4 4 4 4 4 4 10 11 7 . 
+        . 7 11 10 4 11 11 11 11 4 10 11 7 . 
+        . 7 11 10 4 11 2 2 11 4 10 11 7 . 
+        . 7 11 10 4 11 2 2 11 4 10 11 7 . 
+        . 7 11 10 4 11 11 11 11 4 10 11 7 . 
+        . 7 11 10 4 4 4 4 4 4 10 11 7 . 
+        . 7 11 10 10 10 10 10 10 10 11 7 . 
+        . 7 11 11 11 11 11 11 11 11 11 7 . 
+        . 7 7 7 7 7 7 7 7 7 7 7 7 7 7 . 
+        . . . . . . . . . . . . . . . . 
+        `
+}
+
+// spawnHealBoxInRoom places the central healing crate (interact for +5 HP).
+function spawnHealBoxInRoom() {
+    let loc = tiles.getTileLocation(HEAL_BOX_COL, HEAL_BOX_ROW)
+    let box = sprites.create(healBoxImage(), KindHealBox)
+    box.setScale(2)
+    tiles.placeOnTile(box, loc)
+}
+
+// drawSkillIconAt paints a recognizable mini icon for a skill onto an image.
+function drawSkillIconAt(out: Image, skillId: number, ox: number, oy: number, dim: boolean) {
+    let c1 = dim ? 1 : 2
+    let c2 = dim ? 1 : 8
+    let c3 = dim ? 1 : 10
+    let c4 = dim ? 1 : 7
+    let c5 = dim ? 1 : 4
+    let c6 = dim ? 1 : 11
+    if (skillId == PlayerSkillFlyingSlash) {
+        for (let x = 0; x < 8; x++) {
+            out.setPixel(ox + x, oy + 1, c1)
+            out.setPixel(ox + x, oy + 2, c2)
+        }
+        out.setPixel(ox + 1, oy + 3, c1)
+        out.setPixel(ox + 6, oy + 3, c1)
+    } else if (skillId == PlayerSkillJumpSmash) {
+        for (let x = 1; x <= 6; x++) {
+            for (let y = 1; y <= 4; y++) {
+                out.setPixel(ox + x, oy + y, c3)
+            }
+        }
+        out.setPixel(ox + 3, oy, c2)
+        out.setPixel(ox + 4, oy, c2)
+    } else if (skillId == PlayerSkillWhirlwind) {
+        for (let a = 0; a < 8; a++) {
+            out.setPixel(ox + (a % 4) * 2, oy + Math.idiv(a, 4) * 2, c2)
+        }
+    } else if (skillId == PlayerSkillArrowBurst) {
+        out.setPixel(ox + 6, oy + 2, c1)
+        out.setPixel(ox + 5, oy + 2, c1)
+        out.setPixel(ox + 4, oy + 2, c1)
+        out.setPixel(ox + 3, oy + 1, c1)
+        out.setPixel(ox + 3, oy + 3, c1)
+        out.setPixel(ox + 2, oy + 2, c1)
+    } else if (skillId == PlayerSkillHealPulse) {
+        out.setPixel(ox + 2, oy, c2)
+        out.setPixel(ox + 3, oy, c2)
+        out.setPixel(ox + 1, oy + 1, c2)
+        out.setPixel(ox + 4, oy + 1, c2)
+        out.setPixel(ox + 2, oy + 2, c2)
+        out.setPixel(ox + 3, oy + 2, c2)
+        out.setPixel(ox + 2, oy + 3, c2)
+    } else if (skillId == PlayerSkillGroundSlam) {
+        for (let x = 0; x < 8; x++) {
+            out.setPixel(ox + x, oy + 4, c3)
+        }
+        out.setPixel(ox + 3, oy + 1, c2)
+        out.setPixel(ox + 4, oy + 1, c2)
+    } else if (skillId == PlayerSkillLaser) {
+        for (let x = 0; x < 7; x++) {
+            out.setPixel(ox + x, oy + 2, c4)
+        }
+        out.setPixel(ox + 7, oy + 2, c2)
+    } else if (skillId == PlayerSkillShield) {
+        for (let y = 1; y <= 4; y++) {
+            out.setPixel(ox + 1, oy + y, c5)
+            out.setPixel(ox + 6, oy + y, c5)
+        }
+        for (let x = 1; x <= 6; x++) {
+            out.setPixel(ox + x, oy + 1, c5)
+            out.setPixel(ox + x, oy + 4, c5)
+        }
+    } else if (skillId == PlayerSkillPoison) {
+        for (let y = 0; y < 5; y++) {
+            out.setPixel(ox + 3, oy + y, c6)
+            out.setPixel(ox + 4, oy + y, c6)
+        }
+        out.setPixel(ox + 2, oy + 4, c6)
+        out.setPixel(ox + 5, oy + 4, c6)
+    } else if (skillId == PlayerSkillBlink) {
+        out.setPixel(ox + 1, oy + 2, c4)
+        out.setPixel(ox + 5, oy + 2, c4)
+        out.setPixel(ox + 3, oy + 1, c2)
+        out.setPixel(ox + 3, oy + 3, c2)
+    } else if (skillId == PlayerSkillHook) {
+        out.setPixel(ox + 6, oy + 2, c3)
+        out.setPixel(ox + 5, oy + 2, c3)
+        out.setPixel(ox + 4, oy + 2, c2)
+        out.setPixel(ox + 3, oy + 1, c2)
+        out.setPixel(ox + 2, oy + 2, c1)
+    } else if (skillId == PlayerSkillMeteor) {
+        out.setPixel(ox + 2, oy, c3)
+        out.setPixel(ox + 3, oy, c3)
+        out.setPixel(ox + 4, oy + 1, c3)
+        for (let x = 1; x <= 6; x++) {
+            out.setPixel(ox + x, oy + 4, c2)
+        }
+    }
+}
+
+// shopNpcImage returns the Scourge Bringer-style merchant sprite.
+function shopNpcImage(): Image {
+    return img`
+        . . . . . . . . 
+        . . 2 2 2 2 . . 
+        . 2 1 2 2 1 2 . 
+        . 2 2 2 2 2 2 . 
+        . . 8 8 8 8 . . 
+        . 8 10 10 10 8 . 
+        . 8 10 10 10 8 . 
+        . . 8 8 8 8 . . 
+        `
+}
+
+// shopItemPedestalImage returns a glowing pedestal for a skill offer.
+function shopItemPedestalImage(skillId: number): Image {
+    let out = img`
+        . . . . . . . . 
+        . . 6 6 6 6 . . 
+        . 6 1 1 1 1 6 . 
+        . 6 1 1 1 1 6 . 
+        . . 6 6 6 6 . . 
+        . . . . . . . . 
+        . . . . . . . . 
+        . . . . . . . . 
+        `
+    drawSkillIconAt(out, skillId, 3, 1, false)
+    return out
+}
+
+// spawnShopRoomContents spawns merchant + three purchasable skills (gold).
+function spawnShopRoomContents() {
+    let npc = sprites.create(shopNpcImage(), KindShopNpc)
+    npc.setScale(2)
+    tiles.placeOnTile(npc, tiles.getTileLocation(4, 5))
+    let pool: number[] = []
+    for (let s = 3; s <= PLAYER_SKILL_COUNT; s++) {
+        pool.push(s)
+    }
+    for (let i = 0; i < 3; i++) {
+        if (pool.length == 0) {
+            break
+        }
+        let pickIdx = randint(0, pool.length - 1)
+        let skillId = pool[pickIdx]
+        let nextPool: number[] = []
+        for (let j = 0; j < pool.length; j++) {
+            if (j != pickIdx) {
+                nextPool.push(pool[j])
+            }
+        }
+        pool = nextPool
+        let item = sprites.create(shopItemPedestalImage(skillId), KindShopItem)
+        spriteWriteNum(item, "skill", skillId)
+        spriteWriteNum(item, "price", 18 + i * 12)
+        spriteWriteNum(item, "idx", i)
+        tiles.placeOnTile(item, tiles.getTileLocation(6 + i * 4, 6))
+        if (i == shopCursor) {
+            item.setScale(2)
+        } else {
+            item.setScale(1)
+        }
+    }
+    info.setScore(playerGold)
+}
+
+// tryBuyShopItem purchases the skill on a shop pedestal if the player has gold.
+function tryBuyShopItem(item: Sprite): boolean {
+    let price = spriteReadNum(item, "price", 99)
+    if (playerGold < price) {
+        game.splash("Not enough gold")
+        return false
+    }
+    let skillId = spriteReadNum(item, "skill", 0)
+    for (let i = 0; i < SKILL_BAR_SLOTS; i++) {
+        if (playerSkills[i] == 0) {
+            playerSkills[i] = skillId
+            playerGold -= price
+            info.setScore(playerGold)
+            item.destroy()
+            refreshSkillHotbar()
+            game.splash("Bought skill!")
+            return true
+        }
+    }
+    game.splash("Hotbar full")
+    return false
+}
+
+// highlightShopItems scales the selected shop offer.
+function highlightShopItems() {
+    for (let item of sprites.allOfKind(KindShopItem)) {
+        let idx = spriteReadNum(item, "idx", 0)
+        if (idx == shopCursor) {
+            item.setScale(2)
+        } else {
+            item.setScale(1)
+        }
+    }
 }
 
 // handleSpecialRoomEnter applies shop / heal / skill room effects once.
 function handleSpecialRoomEnter(rx: number, ry: number) {
     let rt = roomTypeGrid[ry][rx]
     if (combatGrid[ry][rx] != 0) {
+        inShopRoom = rt == RoomTypeShop
         return
     }
     if (rt == RoomTypeShop) {
         combatGrid[ry][rx] = 2
-        healPlayer(2)
-        game.splash("Shop +2 HP")
+        inShopRoom = true
+        spawnShopRoomContents()
+        game.splash("Shop: touch item + A")
         paintInteriorForRoom(rx, ry)
     } else if (rt == RoomTypeHeal) {
         combatGrid[ry][rx] = 2
-        healPlayer(4)
-        game.splash("Heal +4 HP")
+        inShopRoom = false
+        spawnHealBoxInRoom()
+        game.splash("Heal box: stand on it")
         paintInteriorForRoom(rx, ry)
     } else if (rt == RoomTypeSkill) {
+        inShopRoom = false
         grantSkillFromRoom()
         combatGrid[ry][rx] = 2
         paintInteriorForRoom(rx, ry)
+    } else {
+        inShopRoom = false
     }
 }
 
-// grantSkillFromRoom adds flying slash or jump smash to the first empty hotbar slot.
+// grantSkillFromRoom adds a random skill to the first empty hotbar slot.
 function grantSkillFromRoom() {
-    let options = [PlayerSkillFlyingSlash, PlayerSkillJumpSmash]
-    let pick = options[randint(0, options.length - 1)]
+    let pick = randint(1, PLAYER_SKILL_COUNT)
     for (let i = 2; i < SKILL_BAR_SLOTS; i++) {
         if (playerSkills[i] == 0) {
             playerSkills[i] = pick
@@ -2379,17 +2716,7 @@ function grantSkillFromRoom() {
     game.splash("Hotbar full")
 }
 
-// skillSlotNameForId returns a short label drawn inside the backpack slot.
-function skillSlotNameForId(skillId: number): string {
-    if (skillId == PlayerSkillFlyingSlash) {
-        return "FLY"
-    } else if (skillId == PlayerSkillJumpSmash) {
-        return "JMP"
-    }
-    return ""
-}
-
-// skillBackpackSlotImage builds a 16x16 minecraft-style slot with icon and name.
+// skillBackpackSlotImage builds a 16x16 hotbar slot with a skill icon only (no text).
 function skillBackpackSlotImage(skillId: number, onCooldown: boolean, selected: boolean): Image {
     let out = image.create(16, 16)
     for (let x = 0; x < 16; x++) {
@@ -2405,28 +2732,8 @@ function skillBackpackSlotImage(skillId: number, onCooldown: boolean, selected: 
             }
         }
     }
-    if (skillId == PlayerSkillFlyingSlash) {
-        for (let x = 4; x <= 11; x++) {
-            out.setPixel(x, 5, onCooldown ? 1 : 2)
-            out.setPixel(x, 6, onCooldown ? 1 : 8)
-        }
-        out.setPixel(5, 7, onCooldown ? 1 : 2)
-        out.setPixel(10, 7, onCooldown ? 1 : 2)
-    } else if (skillId == PlayerSkillJumpSmash) {
-        for (let x = 5; x <= 10; x++) {
-            for (let y = 5; y <= 9; y++) {
-                out.setPixel(x, y, onCooldown ? 1 : 10)
-            }
-        }
-    }
-    let name = skillSlotNameForId(skillId)
-    if (name.length >= 3) {
-        out.setPixel(4, 11, onCooldown ? 1 : 7)
-        out.setPixel(5, 11, onCooldown ? 1 : 7)
-        out.setPixel(6, 11, onCooldown ? 1 : 7)
-        out.setPixel(8, 11, onCooldown ? 1 : 7)
-        out.setPixel(9, 11, onCooldown ? 1 : 7)
-        out.setPixel(10, 11, onCooldown ? 1 : 7)
+    if (skillId > 0) {
+        drawSkillIconAt(out, skillId, 4, 4, onCooldown)
     }
     return out
 }
@@ -2528,83 +2835,267 @@ function playFlyingSlash(dir: number, slot: number) {
     skillBusy = false
 }
 
-// playJumpSmash flies toward a direction, ignores interior walls, then smashes down.
+// dirTileDcDr returns the tile step for a facing direction.
+function dirTileDcDr(dir: number): { dc: number, dr: number } {
+    if (dir == DirRight) {
+        return { dc: 1, dr: 0 }
+    }
+    if (dir == DirLeft) {
+        return { dc: -1, dr: 0 }
+    }
+    if (dir == DirDown) {
+        return { dc: 0, dr: 1 }
+    }
+    return { dc: 0, dr: -1 }
+}
+
+// findJumpSmashTarget picks the adjacent tile on the side you face (no wall pass-through).
+function findJumpSmashTarget(dir: number): { x: number, y: number } {
+    let loc = tiles.locationOfSprite(mySprite)
+    let step = dirTileDcDr(dir)
+    for (let dist = 1; dist <= 2; dist++) {
+        let ncol = loc.column + step.dc * dist
+        let nrow = loc.row + step.dr * dist
+        if (ncol < 1 || ncol > roomWidth - 2 || nrow < 1 || nrow > roomHeight - 2) {
+            continue
+        }
+        let tloc = tiles.getTileLocation(ncol, nrow)
+        if (!tiles.tileAtLocationIsWall(tloc)) {
+            return { x: ncol * 16 + 8, y: nrow * 16 + 8 }
+        }
+    }
+    return { x: mySprite.x + dirDx(dir) * 20, y: mySprite.y + dirDy(dir) * 20 }
+}
+
+// playJumpSmash flies to the side circle, damages enemies inside, then slams (walls block movement).
 function playJumpSmash(dir: number, slot: number) {
     skillBusy = true
-    skillIgnoresInteriorWalls = true
     startSkillCooldownForSlot(slot)
-    let tx = mySprite.x + dirDx(dir) * 56
-    let ty = mySprite.y + dirDy(dir) * 56
+    let target = findJumpSmashTarget(dir)
+    let tx = target.x
+    let ty = target.y
+    let circleRadius = 36
     spawnJumpTargetRing(tx, ty)
-    pause(120)
-    for (let step = 0; step < 20; step++) {
+    pause(60)
+    for (let step = 0; step < 28; step++) {
         let dx = tx - mySprite.x
         let dy = ty - mySprite.y
         let m = Math.sqrt(dx * dx + dy * dy)
         if (m < 10) {
             break
         }
-        tryPlayerMove((dx / m) * 12, (dy / m) * 12, true)
-        pause(25)
+        tryPlayerMove((dx / m) * 10, (dy / m) * 10, false)
+        damageEnemiesNearPoint(tx, ty, circleRadius)
+        pause(20)
     }
-    for (let i = 0; i < 7; i++) {
-        mySprite.y -= 5
-        pause(28)
-    }
-    mySprite.x = tx
-    mySprite.y = ty
-    for (let i = 0; i < 9; i++) {
-        mySprite.y += 6
+    damageEnemiesNearPoint(tx, ty, circleRadius)
+    for (let i = 0; i < 5; i++) {
+        tryPlayerMove(0, -5, false)
+        damageEnemiesNearPoint(tx, ty, circleRadius)
         pause(24)
     }
+    for (let i = 0; i < 7; i++) {
+        tryPlayerMove(0, 6, false)
+        damageEnemiesNearPoint(tx, ty, circleRadius)
+        pause(20)
+    }
     spawnShockwaveVisual(mySprite.x, mySprite.y)
-    damageEnemiesNearPoint(mySprite.x, mySprite.y, 52)
+    damageEnemiesNearPoint(mySprite.x, mySprite.y, circleRadius + 6)
     scene.cameraShake(10, 220)
-    skillIgnoresInteriorWalls = false
     skillBusy = false
     nudgeSpriteOffInteriorWall(mySprite)
 }
 
-// registerAPressForDoubleTap counts A presses; on exactly the 2nd tap in 0.5s, casts selected slot skill.
-function registerAPressForDoubleTap() {
-    if (gameFrame - aPressWindowFrame > SKILL_DOUBLE_TAP_FRAMES) {
-        aPressInWindow = 0
+// playSkillWhirlwind spins and damages nearby enemies.
+function playSkillWhirlwind(slot: number) {
+    skillBusy = true
+    startSkillCooldownForSlot(slot)
+    for (let i = 0; i < 10; i++) {
+        damageEnemiesNearPoint(mySprite.x, mySprite.y, 28)
+        pause(40)
     }
-    aPressWindowFrame = gameFrame
-    aPressInWindow++
-    if (aPressInWindow == 2) {
-        aPressInWindow = 0
-        skillUsedThisPress = true
-        pendingSwingAfterFrame = -1
-        beginPlayerSkillFromSlot(selectedSkillSlot)
+    skillBusy = false
+}
+
+// playSkillArrowBurst fires a spread of bullets forward.
+function playSkillArrowBurst(dir: number, slot: number) {
+    skillBusy = true
+    startSkillCooldownForSlot(slot)
+    for (let i = -2; i <= 2; i++) {
+        let off = i * 0.18
+        let bx = dirDx(dir) + dirDy(dir) * off
+        let by = dirDy(dir) - dirDx(dir) * off
+        let m = Math.sqrt(bx * bx + by * by)
+        if (m < 0.01) {
+            m = 1
+        }
+        spawnBullet(mySprite.x, mySprite.y, (bx / m) * 70, (by / m) * 70)
+    }
+    pause(120)
+    skillBusy = false
+}
+
+// playSkillHealPulse restores player HP.
+function playSkillHealPulse(slot: number) {
+    skillBusy = true
+    startSkillCooldownForSlot(slot)
+    healPlayer(3)
+    pause(80)
+    skillBusy = false
+}
+
+// playSkillGroundSlam creates a shockwave at the player's feet.
+function playSkillGroundSlam(slot: number) {
+    skillBusy = true
+    startSkillCooldownForSlot(slot)
+    spawnShockwaveVisual(mySprite.x, mySprite.y)
+    damageEnemiesNearPoint(mySprite.x, mySprite.y, 40)
+    scene.cameraShake(8, 180)
+    pause(100)
+    skillBusy = false
+}
+
+// playSkillLaser fires a fast piercing line in the facing direction.
+function playSkillLaser(dir: number, slot: number) {
+    skillBusy = true
+    startSkillCooldownForSlot(slot)
+    for (let step = 0; step < 14; step++) {
+        let px = mySprite.x + dirDx(dir) * (12 + step * 10)
+        let py = mySprite.y + dirDy(dir) * (12 + step * 10)
+        damageEnemiesNearPoint(px, py, 14)
+        pause(30)
+    }
+    skillBusy = false
+}
+
+// playSkillShield grants brief invulnerability and knocks nearby enemies.
+function playSkillShield(slot: number) {
+    skillBusy = true
+    startSkillCooldownForSlot(slot)
+    playerIFrames = 90
+    for (let e of sprites.allOfKind(KindEnemy)) {
+        knockbackEnemyLight(e)
+    }
+    pause(200)
+    skillBusy = false
+}
+
+// playSkillPoison releases arcing poison bullets.
+function playSkillPoison(dir: number, slot: number) {
+    skillBusy = true
+    startSkillCooldownForSlot(slot)
+    for (let i = -1; i <= 1; i++) {
+        spawnBullet(mySprite.x, mySprite.y, dirDx(dir) * 40 + i * 12, dirDy(dir) * 40 - 20)
+    }
+    pause(150)
+    skillBusy = false
+}
+
+// playSkillBlink teleports one tile in the facing direction (respects walls).
+function playSkillBlink(dir: number, slot: number) {
+    skillBusy = true
+    startSkillCooldownForSlot(slot)
+    let step = dirTileDcDr(dir)
+    for (let dist = 2; dist >= 1; dist--) {
+        let dx = step.dc * dist * 16
+        let dy = step.dr * dist * 16
+        if (tryPlayerMove(dx, dy, false)) {
+            break
+        }
+    }
+    damageEnemiesNearPoint(mySprite.x, mySprite.y, 24)
+    pause(60)
+    skillBusy = false
+}
+
+// playSkillHook pulls the player toward enemies in front and damages them.
+function playSkillHook(dir: number, slot: number) {
+    skillBusy = true
+    startSkillCooldownForSlot(slot)
+    for (let step = 0; step < 6; step++) {
+        tryPlayerMove(dirDx(dir) * 12, dirDy(dir) * 12, false)
+        damageEnemiesNearPoint(mySprite.x + dirDx(dir) * 20, mySprite.y + dirDy(dir) * 20, 26)
+        pause(35)
+    }
+    skillBusy = false
+}
+
+// playSkillMeteor marks a spot ahead then strikes after a short delay.
+function playSkillMeteor(dir: number, slot: number) {
+    skillBusy = true
+    startSkillCooldownForSlot(slot)
+    let tx = mySprite.x + dirDx(dir) * 48
+    let ty = mySprite.y + dirDy(dir) * 48
+    spawnJumpTargetRing(tx, ty)
+    pause(200)
+    spawnShockwaveVisual(tx, ty)
+    damageEnemiesNearPoint(tx, ty, 44)
+    scene.cameraShake(12, 260)
+    skillBusy = false
+}
+
+// playSkillById runs the animation for any player skill id.
+function playSkillById(skillId: number, dir: number, slot: number) {
+    if (skillId == PlayerSkillFlyingSlash) {
+        playFlyingSlash(dir, slot)
+    } else if (skillId == PlayerSkillJumpSmash) {
+        playJumpSmash(dir, slot)
+    } else if (skillId == PlayerSkillWhirlwind) {
+        playSkillWhirlwind(slot)
+    } else if (skillId == PlayerSkillArrowBurst) {
+        playSkillArrowBurst(dir, slot)
+    } else if (skillId == PlayerSkillHealPulse) {
+        playSkillHealPulse(slot)
+    } else if (skillId == PlayerSkillGroundSlam) {
+        playSkillGroundSlam(slot)
+    } else if (skillId == PlayerSkillLaser) {
+        playSkillLaser(dir, slot)
+    } else if (skillId == PlayerSkillShield) {
+        playSkillShield(slot)
+    } else if (skillId == PlayerSkillPoison) {
+        playSkillPoison(dir, slot)
+    } else if (skillId == PlayerSkillBlink) {
+        playSkillBlink(dir, slot)
+    } else if (skillId == PlayerSkillHook) {
+        playSkillHook(dir, slot)
+    } else if (skillId == PlayerSkillMeteor) {
+        playSkillMeteor(dir, slot)
     }
 }
 
-// beginPlayerSkillFromSlot casts the skill in a hotbar slot (double-tap only).
-function beginPlayerSkillFromSlot(slot: number) {
+// beginPlayerSkillFromSlot casts the skill in a hotbar slot; returns true if it started.
+function beginPlayerSkillFromSlot(slot: number): boolean {
     if (slot < 0 || slot >= SKILL_BAR_SLOTS) {
-        return
+        return false
     }
     let skillId = playerSkills[slot]
     if (skillId == 0 || skillBusy || dashBusy || swingBusy || counterBusy) {
-        return
+        return false
     }
     if (isSkillSlotOnCooldown(slot)) {
-        return
+        return false
     }
     let dir = faceDir
     if (dir < DirRight || dir > DirUp) {
         dir = DirRight
     }
-    if (skillId == PlayerSkillFlyingSlash) {
-        control.runInParallel(function () {
-            playFlyingSlash(dir, slot)
-        })
-    } else if (skillId == PlayerSkillJumpSmash) {
-        control.runInParallel(function () {
-            playJumpSmash(dir, slot)
-        })
+    pendingSwingAfterFrame = -1
+    control.runInParallel(function () {
+        playSkillById(skillId, dir, slot)
+    })
+    return true
+}
+
+// tryTriggerSkillOnA casts the selected backpack skill (press or hold >= 0.2s).
+function tryTriggerSkillOnA(): boolean {
+    if (skillUsedThisPress) {
+        return false
     }
+    if (beginPlayerSkillFromSlot(selectedSkillSlot)) {
+        skillUsedThisPress = true
+        return true
+    }
+    return false
 }
 
 // onBossDefeated clears the boss fight and wins the game.
@@ -2744,7 +3235,9 @@ function spawnEnemyAtType(col: number, row: number, typ: number): boolean {
         spriteWriteNum(e, "windup", 0)
         spriteWriteNum(e, "alert", 0)
     }
+    spriteWriteNum(e, "maxhp", spriteReadNum(e, "hp", 1))
     tiles.placeOnTile(e, loc)
+    attachEnemyHeartBar(e)
     roomEnemyCount++
     return true
 }
@@ -3405,6 +3898,11 @@ function createRoom(rx: number, ry: number) {
     }
 
     handleSpecialRoomEnter(rx, ry)
+    if (roomTypeGrid[ry][rx] == RoomTypeShop) {
+        inShopRoom = true
+    } else if (roomTypeGrid[ry][rx] != RoomTypeShop) {
+        inShopRoom = false
+    }
 
     if (combatGrid[ry][rx] == 1) {
         roomEnterGrace = ROOM_ENTER_GRACE_FRAMES
@@ -3534,7 +4032,25 @@ sprites.onOverlap(SpriteKind.Player, KindHeal, function (player, pickup) {
     collectHealPickup(pickup)
 })
 
+sprites.onOverlap(SpriteKind.Player, KindHealBox, function (player, box) {
+    if (healBoxUsedThisRoom) {
+        return
+    }
+    healBoxUsedThisRoom = true
+    healPlayer(HEAL_BOX_AMOUNT)
+    box.destroy()
+    game.splash("+5 HP")
+})
+
+sprites.onOverlap(SpriteKind.Player, KindShopItem, function (player, item) {
+    if (!inShopRoom) {
+        return
+    }
+    tryBuyShopItem(item)
+})
+
 sprites.onDestroyed(KindEnemy, function (sprite) {
+    destroyEnemyHeartByUid(spriteReadNumFromData(sprite, "euid", 0))
     destroyAlertByUid(spriteReadNumFromData(sprite, "euid", 0))
     if (ignoreEnemyDestroys) {
         return
@@ -3601,11 +4117,10 @@ game.onUpdate(function () {
         checkReflectedBulletHits()
         checkBulletHitsPlayer()
 
-        if (aBtnHeld && !swingBusy && !counterBusy && !dashBusy && !skillUsedThisPress) {
+        if (aBtnHeld && !swingBusy && !dashBusy && !skillBusy) {
             aHoldFrames++
-            if (!counterTriggeredThisHold && aHoldFrames >= COUNTER_HOLD_FRAMES) {
-                counterTriggeredThisHold = true
-                beginCounter()
+            if (!skillUsedThisPress && aHoldFrames >= COUNTER_HOLD_FRAMES) {
+                tryTriggerSkillOnA()
             }
         }
 
@@ -3625,15 +4140,10 @@ game.onUpdate(function () {
 
     checkHealPickupNearPlayer()
 
+    syncAllEnemyHeartBars()
+
     if (gameFrame % 20 == 0) {
         refreshSkillHotbar()
-    }
-
-    if (pendingSwingAfterFrame > 0 && gameFrame >= pendingSwingAfterFrame) {
-        pendingSwingAfterFrame = -1
-        if (!aBtnHeld && !swingBusy && !counterBusy && !skillBusy && !dashBusy) {
-            beginSwing()
-        }
     }
 })
 
@@ -3642,22 +4152,39 @@ controller.A.onEvent(ControllerButtonEvent.Pressed, function () {
     aHoldFrames = 0
     counterTriggeredThisHold = false
     skillUsedThisPress = false
-    registerAPressForDoubleTap()
+    if (inShopRoom) {
+        for (let item of sprites.allOfKind(KindShopItem)) {
+            if (mySprite.overlapsWith(item)) {
+                if (tryBuyShopItem(item)) {
+                    skillUsedThisPress = true
+                    return
+                }
+            }
+        }
+    }
+    tryTriggerSkillOnA()
 })
 
 controller.A.onEvent(ControllerButtonEvent.Released, function () {
     aBtnHeld = false
-    if (counterTriggeredThisHold) {
-        return
-    }
     if (skillUsedThisPress) {
         return
     }
-    pendingSwingAfterFrame = gameFrame + SKILL_DOUBLE_TAP_FRAMES
+    if (aHoldFrames < COUNTER_HOLD_FRAMES) {
+        beginSwing()
+    }
 })
 
 controller.menu.onEvent(ControllerButtonEvent.Pressed, function () {
     if (dashBusy || swingBusy || counterBusy || skillBusy) {
+        return
+    }
+    if (inShopRoom && sprites.allOfKind(KindShopItem).length > 0) {
+        shopCursor += 1
+        if (shopCursor > 2) {
+            shopCursor = 0
+        }
+        highlightShopItems()
         return
     }
     selectedSkillSlot += 1
@@ -3672,6 +4199,7 @@ controller.B.onEvent(ControllerButtonEvent.Pressed, function () {
 })
 
 info.setLife(PLAYER_MAX_LIFE)
+info.setScore(playerGold)
 profilelife.setMaxLife(10)
 mySprite = sprites.create(img`
     . . . . . . . . 
